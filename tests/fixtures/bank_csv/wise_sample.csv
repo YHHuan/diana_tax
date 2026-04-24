@@ -1,0 +1,5 @@
+Date,Description,Counterparty,Amount,Currency,Type
+2025-04-23,Payment received invoice #556,Wise Customer,1250,USD,Payment received
+2025-04-24,Incoming transfer bonus,Client TW,30000,TWD,Transfer in
+2025-04-25,Payment received EUR payout,Client EU,200,EUR,Payment received
+2025-04-26,Card transaction lunch,Restaurant,-25,USD,Card

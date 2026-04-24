@@ -39,9 +39,10 @@ with tab1:
 
     bank_options = {
         "cathay": "國泰世華 MyB2B / CUBE",
-        "esun": "玉山（先走 generic fallback）",
-        "twb": "台銀（先走 generic fallback）",
-        "wise": "Wise（先走 generic fallback）",
+        "esun": "玉山個人網銀 CSV",
+        "richart": "Richart app / 匯出明細 CSV",
+        "twb": "台灣銀行 e-go 個人網銀 CSV",
+        "wise": "Wise statement CSV",
         "generic": "通用 3 欄 CSV",
     }
     income_type_options = [""] + list(R.INCOME_TYPE_LABELS_ZH.keys())
@@ -157,6 +158,19 @@ with tab1:
                     st.error("錯誤：\n" + "\n".join(errors[:10]))
         elif uploaded_bank_csv:
             st.info("這份銀行 CSV 沒有解析出可匯入的入帳列。")
+
+    st.markdown("---")
+
+    # === 扣繳憑單 ===
+    st.subheader("扣繳憑單 PDF 上傳")
+    st.caption("先放上傳入口；後續會接 Claude 的 slip_ocr 結構化解析。")
+
+    uploaded_slip_pdf = st.file_uploader("上傳扣繳憑單 PDF", type=["pdf"], key="slip_pdf_uploader")
+    if st.button("送去解析（coming soon）", key="slip_pdf_parse_stub"):
+        if not uploaded_slip_pdf:
+            st.warning("請先上傳一份 PDF。")
+        else:
+            st.info("Claude's slip_ocr will parse this — coming soon")
 
     st.markdown("---")
 
