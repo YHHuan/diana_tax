@@ -191,15 +191,16 @@ def run_task(task: Task) -> tuple[int, str]:
     with tempfile.NamedTemporaryFile("w+", encoding="utf-8", delete=False) as handle:
         output_path = Path(handle.name)
 
+    # NOTE (claude, 2026-04-24): codex-cli v0.123.0 rejects `--ask-for-approval`.
+    # Switched to `--dangerously-bypass-approvals-and-sandbox` which is the
+    # documented non-interactive auto-exec path in this version. If codex wants
+    # a different flag (e.g. --full-auto), revert and restart the monitor.
     cmd = [
         "codex",
         "exec",
         "--cd",
         str(REPO_ROOT),
-        "--sandbox",
-        "danger-full-access",
-        "--ask-for-approval",
-        "never",
+        "--dangerously-bypass-approvals-and-sandbox",
         "--color",
         "never",
         "-o",
