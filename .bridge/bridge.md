@@ -1,26 +1,22 @@
 # Claude <-> Codex Bridge
 
 ## Active Task
-- Task ID: 2
-- Assignee: codex
-- Status: doing
+- Task ID: 4
+- Assignee: none
+- Status: idle
 - Requested By: claude
-- Updated At: 2026-04-24T10:13:07+08:00
-- Summary: Build bank CSV importer scaffold with cathay (國泰世華) parser + tests. (Retry of Task 1 after monitor fix.)
+- Updated At: 2026-04-24T10:35:00+08:00
+- Summary: v1 pause — waiting on Diana's real data before queueing more work.
 - Details:
-  - Create package `importers/bank_csv/` with `__init__.py` exposing `parse(path, bank) -> list[IncomeDraft]` dispatcher keyed on bank string ("cathay", "esun", "twb", "wise", "generic").
-  - Use the shared `IncomeDraft` dataclass from `importers/common.py` (already in repo). Do NOT redefine it.
-  - Implement `importers/bank_csv/cathay.py` first. The goal: read a CSV exported from 國泰世華 MyB2B / CUBE, emit one IncomeDraft per **credit (inbound transfer)** row. Skip outflows / 自己轉帳.
-  - Populate: `date`, `amount` (Decimal, positive), `currency`="TWD", `raw_description` (concat memo / 摘要 / 對方戶名), `counterparty_hint` (對方戶名 if present), `source="bank_csv:cathay"`, `source_row_id=<row index>`, `confidence` 0.6–0.8.
-  - Do NOT guess income_type — leave `suggested_income_type=None`. UI layer will ask Diana to classify.
-  - Add `importers/bank_csv/generic.py` as fallback: 3-column mode (date, amount, memo) with column-name auto-detect. Accepts `column_map={"date": "交易日", ...}` kwarg for overrides.
-  - Write `tests/test_bank_csv.py`:
-    * At least 2 fixture CSVs under `tests/fixtures/bank_csv/` — sample cathay row + generic row, fabricated realistic but de-identified.
-    * Cases: "inflow rows become drafts", "outflow rows skipped", "amount parsed as Decimal", "empty CSV returns []".
-  - Update `ui/pages/5_📤_匯入匯出.py`: add a "銀行 CSV 匯入" section with bank selector + file uploader. On upload, call parser, show preview as editable dataframe, with "Diana 勾選確認後寫入" button that converts each IncomeDraft → `core.models.Income` and calls `storage.db.save_income`. If the UI wiring is too big for this turn, stub the section with a clear TODO and split into follow-up Task 2.
-  - Document 國泰世華 CSV column layout in `docs/bank_csv_formats.md`. If Diana's real CSV isn't handy, write from public docs + mark "awaiting real sample".
-  - Run `python -m pytest tests/ -q` before finishing. All tests (existing 20 + new) must pass.
-  - When done: commit with clear message and push to origin/main. Bridge monitor auto-flips status.
+  - All v1 slices in the road-map are shipped: tax engine (v0), bank CSV importers (4 banks + generic fallback), Claude-API slip OCR, receivables tracking, Markdown filing draft, dashboard roll-up, demo seed. 59 tests green.
+  - Holding new work for Diana's first real session. Priorities that could become Task 5+ later:
+    1. FX conversion for Wise non-TWD rows (need Diana's preferred rate source).
+    2. PDF export of 報稅草稿 (weasyprint — nice-to-have, Markdown prints fine today).
+    3. Gmail import for business-notification emails (requires Diana's OAuth consent).
+    4. Email / LINE integration for dunning drafts (currently copy-paste).
+    5. De-dup heuristic for multi-source imports (bank CSV vs slip PDF vs future email).
+  - Codex: no new task assigned. Claude is now passive-monitoring the bridge.
+  - If Diana hits a rough edge, whoever takes the ticket increments Task ID and writes under here.
 
 ## Activity Log
 
@@ -57,3 +53,29 @@
 
 ### 2026-04-24T10:13:07+08:00 | codex
 - Picked up task 2: Build bank CSV importer scaffold with cathay (國泰世華) parser + tests. (Retry of Task 1 after monitor fix.)
+
+### 2026-04-24T10:19:11+08:00 | codex
+- Completed task 2: Implemented Task 2 and pushed it. - Added [importers/bank_csv/__init__.py](/home/salmonyhh/diana_tax/importers/bank_csv/__init__.py), [cathay.py](/home/salmonyhh/diana_tax/importers/bank_csv/cathay.py), [generic.py](/home/salmonyhh/diana...
+
+### 2026-04-24T10:20:41+08:00 | codex
+- Picked up task 3: Add 玉山/Richart + 台灣銀行 + Wise bank CSV parsers, plus a 扣繳憑單 PDF upload stub in the 匯入匯出 page.
+
+### 2026-04-24T10:27:24+08:00 | codex
+- Completed task 3: Task 3 complete. - Added bank CSV parsers for 玉山/Richart, 台灣銀行, and Wise in `importers/bank_csv/esun.py`, `twb.py`, and `wise.py`, and wired dispatcher support in `importers/bank_csv/__init__.py`. - Richart now routes through the 玉山 pars...
+
+### 2026-04-24T10:35:00+08:00 | claude — end of batch
+- Pulled + verified Task 3: 4 parsers registered, tests 59/59 green.
+- Wired `importers.slip_ocr` into the 扣繳憑單 section of `ui/pages/5_📤_匯入匯出.py` (commit 7a73b63): file upload → parse_slip → editable confirm form → save WithholdingSlip. Graceful `AnthropicNotConfigured` handling.
+- Added `scripts/seed_demo.py` (commit b380bbb) so Diana can clickthrough every page with realistic data before touching her own records.
+- Added `docs/DIANA_QUICKSTART.md` — 10-step first-day guide.
+- Set Task ID 4 to idle with no assignee (see above). v1 slice is feature-complete for Diana's first session. Reopen with a new Task ID when Diana reports a rough edge or we get real CSV/PDF samples to harden parsers against.
+- Summary of commits added this session (after bootstrap):
+  * 8395e4b Fix codex bridge monitor for codex-cli v0.123.0
+  * dd35643 Add slip_ocr: Claude API 扣繳憑單 PDF extractor
+  * 64e9bea (codex) Add bank CSV import scaffold with Cathay parser
+  * 1e511f6 Add 報稅草稿 page + core.report + anthropic dep
+  * e7ea01a Add 應收追蹤 page + receivables classifier + LLM dunning helper
+  * 4595496 Dashboard: surface overdue receivables + list new pages in sidebar
+  * b380bbb Add scripts/seed_demo.py for day-1 clickthrough
+  * 4c6309f (codex) Add bank CSV parsers for esun twb and wise
+  * 7a73b63 Wire slip_ocr into 匯入匯出 page
