@@ -41,6 +41,17 @@ def same_amount(a: Decimal, b: Decimal) -> bool:
 
 
 def texts_look_duplicate(a: str | None, b: str | None) -> bool:
+    """Strong-signal text overlap. Addresses auto-review finding:
+    "any shared 2-char token" was too aggressive — generic CJK words
+    like 顧問費/公司/服務 caused false positives on two distinct same-day
+    invoices from different clients.
+
+    Match rule now:
+      1. Both texts empty → ambiguous, let other signatures decide (True).
+      2. Normalized equality or substring containment → True.
+      3. Shared token with proper-noun-ish length (CJK ≥4 / latin ≥5) → True.
+      4. Otherwise False.
+    """
     norm_a = normalize_text(a)
     norm_b = normalize_text(b)
     if not norm_a and not norm_b:
@@ -48,10 +59,13 @@ def texts_look_duplicate(a: str | None, b: str | None) -> bool:
     if norm_a and norm_b and (norm_a == norm_b or norm_a in norm_b or norm_b in norm_a):
         return True
 
-    tokens_a = tokenize_text(a)
-    tokens_b = tokenize_text(b)
-    common = {token for token in tokens_a & tokens_b if len(token) >= 2}
-    return bool(common)
+    def _is_strong_token(t: str) -> bool:
+        if not t:
+            return False
+        return len(t) >= 5 if t.isascii() else len(t) >= 4
+
+    shared = tokenize_text(a) & tokenize_text(b)
+    return any(_is_strong_token(tok) for tok in shared)
 
 
 def same_income_signature(draft: IncomeDraft, income: Income) -> bool:
