@@ -1,16 +1,26 @@
 # Claude <-> Codex Bridge
 
 ## Active Task
-- Task ID: 0
-- Assignee: none
-- Status: idle
-- Requested By: user
-- Updated At: 2026-04-24T10:05:00+08:00
-- Summary: Waiting for Claude to finish initial repo review.
+- Task ID: 1
+- Assignee: codex
+- Status: todo
+- Requested By: claude
+- Updated At: 2026-04-24T10:15:00+08:00
+- Summary: Build bank CSV importer scaffold with cathay (國泰世華) parser + tests.
 - Details:
-  - Repo `main` is currently empty after clone.
-  - Use this file to hand off concrete work items between Claude and Codex.
-  - To assign Codex work, increment `Task ID`, set `Assignee: codex` or `shared`, and describe the task here.
+  - Create package `importers/bank_csv/` with `__init__.py` exposing `parse(path, bank) -> list[IncomeDraft]` dispatcher keyed on bank string ("cathay", "esun", "twb", "wise", "generic").
+  - Use the shared `IncomeDraft` dataclass from `importers/common.py` (already in repo). Do NOT redefine it.
+  - Implement `importers/bank_csv/cathay.py` first. The goal: read a CSV exported from 國泰世華 MyB2B / CUBE, emit one IncomeDraft per **credit (inbound transfer)** row. Skip outflows / 自己轉帳.
+  - Populate: `date`, `amount` (Decimal, positive), `currency`="TWD", `raw_description` (concat memo / 摘要 / 對方戶名), `counterparty_hint` (對方戶名 if present), `source="bank_csv:cathay"`, `source_row_id=<row index>`, `confidence` 0.6–0.8.
+  - Do NOT guess income_type — leave `suggested_income_type=None`. UI layer will ask Diana to classify.
+  - Add `importers/bank_csv/generic.py` as fallback: 3-column mode (date, amount, memo) with column-name auto-detect. Accepts `column_map={"date": "交易日", ...}` kwarg for overrides.
+  - Write `tests/test_bank_csv.py`:
+    * At least 2 fixture CSVs under `tests/fixtures/bank_csv/` — sample cathay row + generic row, fabricated realistic but de-identified.
+    * Cases: "inflow rows become drafts", "outflow rows skipped", "amount parsed as Decimal", "empty CSV returns []".
+  - Update `ui/pages/5_📤_匯入匯出.py`: add a "銀行 CSV 匯入" section with bank selector + file uploader. On upload, call parser, show preview as editable dataframe, with "Diana 勾選確認後寫入" button that converts each IncomeDraft → `core.models.Income` and calls `storage.db.save_income`. If the UI wiring is too big for this turn, stub the section with a clear TODO and split into follow-up Task 2.
+  - Document 國泰世華 CSV column layout in `docs/bank_csv_formats.md`. If Diana's real CSV isn't handy, write from public docs + mark "awaiting real sample".
+  - Run `python -m pytest tests/ -q` before finishing. All tests (existing 20 + new) must pass.
+  - When done: commit with clear message and push to origin/main. Bridge monitor auto-flips status.
 
 ## Activity Log
 
@@ -20,3 +30,14 @@
 
 ### 2026-04-24T10:06:02+08:00 | codex
 - Codex bridge monitor is now active and polling for new `codex` or `shared` tasks.
+
+### 2026-04-24T10:15:00+08:00 | claude
+- Completed initial repo review. v0 skeleton moved from Downloads into ~/diana_tax.
+- All 20 tax engine tests pass; Streamlit smoke-test returns HTTP 200.
+- Added `importers/common.py` with shared `IncomeDraft` + `SlipDraft` dataclasses — use these, don't redefine.
+- Pushed initial commit c92ccc8 ("Bootstrap v0: tax engine, UI, bridge scaffolding").
+- Assigning Task 1 to codex (see above). Claude will work in parallel on `importers/slip_ocr.py` (Claude API 扣繳憑單 OCR via ANTHROPIC_API_KEY) — no file overlap.
+- File ownership for parallel work:
+  * **codex**: `importers/bank_csv/**`, `tests/test_bank_csv.py`, `docs/bank_csv_formats.md`, 銀行 CSV section of `ui/pages/5_📤_匯入匯出.py`.
+  * **claude**: `importers/slip_ocr.py`, `importers/llm/**`, `tests/test_slip_ocr.py`, 扣繳憑單 section of same UI page, later also `ui/pages/6_⏰_應收追蹤.py` + `ui/pages/7_📄_報稅草稿.py`.
+  * If both need to edit `ui/pages/5_📤_匯入匯出.py`, keep sections clearly delimited by `# === 銀行 CSV ===` / `# === 扣繳憑單 ===` banners.
