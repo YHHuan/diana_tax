@@ -1,0 +1,34 @@
+# Data (Diana's actual records)
+data/
+*.db
+*.sqlite
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Bridge runtime artifacts (code is tracked, runtime state isn't)
+.bridge/monitor.log
+.bridge/*.state.json
+.bridge/__pycache__/
