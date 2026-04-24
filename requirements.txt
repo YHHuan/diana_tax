@@ -6,3 +6,11 @@ pytest>=8.0.0
 # LLM-backed importers (slip OCR). Optional at import time —
 # importers.llm raises AnthropicNotConfigured if anthropic or the key is missing.
 anthropic>=0.40.0
+
+# PDF export
+reportlab>=4.2.0
+
+# Gmail import
+google-api-python-client>=2.170.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.0

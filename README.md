@@ -2,7 +2,7 @@
 
 給 Diana 用的台灣自由工作者記帳 × 報稅助手。
 
-**這是 v0 骨架** — 稅算引擎完整、UI 可用、SQLite 儲存。先跑起來 Diana 開始填資料，下一階段再加匯入器、LLM 解析。
+本機可用的台灣自由工作者記帳 × 報稅助手。現在已經包含 tax engine、銀行 CSV 匯入、扣繳憑單 OCR、Gmail 匯入草稿、應收追蹤、報稅草稿 Markdown / PDF 匯出。
 
 ---
 
@@ -32,14 +32,17 @@ streamlit run ui/app.py
 
 ---
 
-## 功能（v0）
+## 功能
 
 - **📊 Dashboard** — 本年度收入總覽、預估稅額、預估退補
 - **➕ 新增收入** — 一筆一筆記（3 個必填），智能提示業主應扣多少
 - **📋 收入明細** — Excel-like 表格、可篩選排序、CSV 匯出
 - **🧮 稅額試算** — 現況 / 假設情境 / 類別比較
 - **👤 個人設定** — 婚姻、扶養、職業、健保
-- **📤 匯入/匯出** — CSV 匯入、JSON 備份、報稅草稿 Markdown
+- **📤 匯入/匯出** — 銀行 CSV 匯入、Gmail 匯款通知匯入、JSON 備份、報稅草稿 Markdown / PDF
+- **📄 扣繳憑單 OCR** — 用 Claude API 把 PDF 轉成可確認的結構化資料
+- **⏰ 應收追蹤** — 找出未收款，產生催款草稿
+- **📄 報稅草稿** — 匯出 Markdown / PDF，5 月直接對著財政部系統填
 
 ---
 
@@ -84,7 +87,7 @@ python -m pytest tests/ -v
 
 ## 下一步 roadmap
 
-- **v1（1–2 月）**：銀行 CSV 匯入、扣繳憑單 PDF OCR、email 解析
+- **vNext**：Wise 匯率來源自動化、跨來源 dedup 規則再硬化、Gmail query 模板、報稅草稿樣式微調
 - **v2（3–6 月）**：MyData 整合、Railway 部署
 - 完整路線圖看 `PLAN.md`
 

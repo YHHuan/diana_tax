@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT))
 import pytest
 
 from core.report import build_markdown_report, IncomeRow, SlipRow
+from core.report_pdf import render_markdown_pdf
 
 
 def _inc(**kw):
@@ -87,6 +88,20 @@ def test_itemized_deduction_overrides_standard():
     )
     assert "標準扣除額" in md_std
     assert "列舉扣除額" in md_itm
+
+
+def test_markdown_can_render_to_pdf_bytes():
+    md = build_markdown_report(
+        tax_year=114,
+        incomes=[_inc(amount=50_000, income_type="9B_speech", payer_name="某大學")],
+        slips=[],
+        user_name="黃雅涵",
+    )
+
+    pdf_bytes = render_markdown_pdf(md, title="test")
+
+    assert pdf_bytes.startswith(b"%PDF")
+    assert len(pdf_bytes) > 1000
 
 
 if __name__ == "__main__":

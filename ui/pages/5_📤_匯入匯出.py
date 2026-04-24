@@ -17,16 +17,198 @@ from decimal import Decimal
 import json
 from tempfile import NamedTemporaryFile
 
-from storage.db import list_incomes, save_income, list_clients, save_client, get_session
+from storage.db import DATA_DIR, list_incomes, save_income, list_clients, save_client, get_session
 from core.models import Income, Client
 from core import rules_114 as R
 from importers.bank_csv import parse as parse_bank_csv
+from importers.common import IncomeDraft
+from importers.dedup import find_batch_duplicates, find_existing_duplicates
+from importers.email_gmail import (
+    DEFAULT_GMAIL_QUERY,
+    GmailNotConfigured,
+    fetch_income_drafts_from_gmail,
+    save_uploaded_gmail_credentials,
+)
+from core.fx import parse_fx_rate, convert_drafts_to_twd
 
 
 st.set_page_config(page_title="匯入 / 匯出", page_icon="📤", layout="wide")
 st.title("📤 匯入 / 匯出")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📥 CSV 匯入", "📦 JSON 備份/還原", "💾 匯出報稅草稿", "🔮 未來整合"])
+
+GMAIL_DIR = DATA_DIR / "gmail"
+GMAIL_CLIENT_SECRET_PATH = GMAIL_DIR / "client_secret.json"
+GMAIL_TOKEN_PATH = GMAIL_DIR / "token.json"
+
+
+def _drafts_from_dicts(items: list[dict]) -> list[IncomeDraft]:
+    drafts: list[IncomeDraft] = []
+    for item in items:
+        drafts.append(
+            IncomeDraft(
+                date=pd.to_datetime(item["date"]).date(),
+                amount=Decimal(str(item["amount"])),
+                currency=str(item.get("currency", "TWD") or "TWD"),
+                raw_description=str(item.get("raw_description", "") or ""),
+                counterparty_hint=item.get("counterparty_hint"),
+                suggested_income_type=item.get("suggested_income_type"),
+                suggested_tax_withheld=Decimal(str(item["suggested_tax_withheld"]))
+                if item.get("suggested_tax_withheld") is not None
+                else None,
+                suggested_nhi_withheld=Decimal(str(item["suggested_nhi_withheld"]))
+                if item.get("suggested_nhi_withheld") is not None
+                else None,
+                source=str(item.get("source", "unknown") or "unknown"),
+                source_row_id=item.get("source_row_id"),
+                confidence=float(item.get("confidence", 0.5) or 0.5),
+                notes=str(item.get("notes", "") or ""),
+                extra=dict(item.get("extra", {}) or {}),
+            )
+        )
+    return drafts
+
+
+def _build_preview_rows(drafts: list[IncomeDraft]) -> list[dict]:
+    existing_incomes = list_incomes(tax_year=R.TAX_YEAR, limit=10000)
+    batch_duplicates = find_batch_duplicates(drafts)
+    existing_duplicates = find_existing_duplicates(drafts, existing_incomes)
+
+    rows: list[dict] = []
+    for index, draft in enumerate(drafts):
+        duplicate_reason = existing_duplicates.get(index) or batch_duplicates.get(index) or ""
+        original_amount = draft.extra.get("original_amount", str(draft.amount))
+        original_currency = draft.extra.get("original_currency", draft.currency)
+        rows.append(
+            {
+                "匯入": not bool(duplicate_reason),
+                "日期": draft.date.isoformat(),
+                "金額(TWD)": str(draft.amount),
+                "原始金額": str(original_amount),
+                "原始幣別": str(original_currency),
+                "所得類別": draft.suggested_income_type or "",
+                "扣繳綜所稅": "0",
+                "扣繳二代健保": "0",
+                "對方": draft.counterparty_hint or "",
+                "說明": draft.raw_description,
+                "備註": draft.notes,
+                "來源": draft.source,
+                "來源列": draft.source_row_id or "",
+                "信心": draft.confidence,
+                "重複警告": duplicate_reason,
+            }
+        )
+    return rows
+
+
+def _render_import_editor(rows: list[dict], *, editor_key: str):
+    income_type_options = [""] + list(R.INCOME_TYPE_LABELS_ZH.keys())
+    return st.data_editor(
+        pd.DataFrame(rows),
+        hide_index=True,
+        use_container_width=True,
+        key=editor_key,
+        column_config={
+            "匯入": st.column_config.CheckboxColumn("匯入"),
+            "日期": st.column_config.TextColumn("日期"),
+            "金額(TWD)": st.column_config.TextColumn("金額(TWD)"),
+            "原始金額": st.column_config.TextColumn("原始金額", disabled=True),
+            "原始幣別": st.column_config.TextColumn("原始幣別", disabled=True),
+            "所得類別": st.column_config.SelectboxColumn("所得類別", options=income_type_options),
+            "扣繳綜所稅": st.column_config.TextColumn("扣繳綜所稅"),
+            "扣繳二代健保": st.column_config.TextColumn("扣繳二代健保"),
+            "對方": st.column_config.TextColumn("對方"),
+            "說明": st.column_config.TextColumn("說明", width="large"),
+            "備註": st.column_config.TextColumn("備註", width="large"),
+            "來源": st.column_config.TextColumn("來源", disabled=True),
+            "來源列": st.column_config.TextColumn("來源列", disabled=True),
+            "信心": st.column_config.NumberColumn("信心", format="%.2f", disabled=True),
+            "重複警告": st.column_config.TextColumn("重複警告", disabled=True, width="medium"),
+        },
+    )
+
+
+def _commit_import_rows(edited_df: pd.DataFrame, *, button_key: str, button_label: str):
+    if not st.button(button_label, type="primary", key=button_key):
+        return
+
+    imported = 0
+    skipped = 0
+    errors = []
+
+    for idx, row in edited_df.iterrows():
+        if not bool(row.get("匯入", False)):
+            skipped += 1
+            continue
+
+        duplicate_warning = str(row.get("重複警告", "") or "").strip()
+        if duplicate_warning.startswith("與既有收入重複"):
+            skipped += 1
+            errors.append(f"第 {idx+1} 筆：{duplicate_warning}")
+            continue
+
+        income_type = str(row.get("所得類別", "") or "").strip()
+        if income_type not in R.INCOME_TYPE_LABELS_ZH:
+            skipped += 1
+            errors.append(f"第 {idx+1} 筆：請先選所得類別")
+            continue
+
+        try:
+            row_date = pd.to_datetime(row["日期"]).date()
+            raw_description = str(row.get("說明", "") or "").strip()
+            notes = str(row.get("備註", "") or "").strip()
+            counterparty = str(row.get("對方", "") or "").strip()
+            extra_notes = [part for part in (counterparty, raw_description) if part]
+            summary = " | ".join(extra_notes)
+            combined_notes = summary if not notes else f"{summary}\n{notes}" if summary else notes
+
+            income = Income(
+                date=row_date,
+                amount=Decimal(str(row["金額(TWD)"])),
+                currency="TWD",
+                income_type=income_type,
+                tax_withheld=Decimal(str(row.get("扣繳綜所稅", 0) or 0)),
+                nhi_withheld=Decimal(str(row.get("扣繳二代健保", 0) or 0)),
+                status="received",
+                received_date=row_date,
+                notes=combined_notes,
+                tax_year=R.TAX_YEAR,
+                source=str(row.get("來源", "import") or "import"),
+            )
+            save_income(income)
+            imported += 1
+        except Exception as e:
+            skipped += 1
+            errors.append(f"第 {idx+1} 筆：{e}")
+
+    st.success(f"✅ 匯入 {imported} 筆，跳過 {skipped} 筆")
+    if errors:
+        st.error("錯誤：\n" + "\n".join(errors[:10]))
+
+
+def _get_fx_rates_from_inputs(*, key_prefix: str, currencies: set[str]) -> dict[str, Decimal]:
+    rates: dict[str, Decimal] = {}
+    if not currencies:
+        return rates
+
+    st.caption("非 TWD 金額先換算為 TWD 再寫入正式收入。請填 Diana 決定採用的匯率。")
+    cols = st.columns(max(1, min(3, len(currencies))))
+    for idx, currency in enumerate(sorted(currencies)):
+        with cols[idx % len(cols)]:
+            rate_value = st.text_input(
+                f"{currency} -> TWD",
+                value="",
+                placeholder="例如 31.80",
+                key=f"{key_prefix}_fx_{currency}",
+            )
+        try:
+            rate = parse_fx_rate(rate_value)
+        except Exception as exc:
+            st.warning(f"{currency} 匯率格式錯誤：{exc}")
+            continue
+        if rate is not None:
+            rates[currency] = rate
+    return rates
 
 
 # ============================================================
@@ -35,7 +217,7 @@ tab1, tab2, tab3, tab4 = st.tabs(["📥 CSV 匯入", "📦 JSON 備份/還原", 
 with tab1:
     # === 銀行 CSV ===
     st.subheader("銀行 CSV 匯入")
-    st.caption("先把銀行入帳明細解析成草稿，再由 Diana 勾選、補所得類別後寫入正式收入。")
+    st.caption("先把銀行入帳明細解析成草稿，再由 Diana 勾選、補所得類別後寫入正式收入。系統會先做跨來源 dedup 檢查。")
 
     bank_options = {
         "cathay": "國泰世華 MyB2B / CUBE",
@@ -70,94 +252,109 @@ with tab1:
                 tmp_path.unlink(missing_ok=True)
 
         if uploaded_bank_csv and drafts:
-            preview_rows = []
-            for draft in drafts:
-                preview_rows.append({
-                    "匯入": True,
-                    "日期": draft.date.isoformat(),
-                    "金額": str(draft.amount),
-                    "所得類別": draft.suggested_income_type or "",
-                    "扣繳綜所稅": "0",
-                    "扣繳二代健保": "0",
-                    "對方": draft.counterparty_hint or "",
-                    "說明": draft.raw_description,
-                    "備註": draft.notes,
-                    "來源": draft.source,
-                    "來源列": draft.source_row_id or "",
-                    "信心": draft.confidence,
-                })
+            non_twd_currencies = {
+                str(draft.currency or "TWD").upper()
+                for draft in drafts
+                if str(draft.currency or "TWD").upper() != "TWD"
+            }
+            if selected_bank == "wise" and non_twd_currencies:
+                fx_rates = _get_fx_rates_from_inputs(
+                    key_prefix=f"wise_{uploaded_bank_csv.name}",
+                    currencies=non_twd_currencies,
+                )
+                drafts, fx_warnings = convert_drafts_to_twd(drafts, fx_rates)
+                if fx_warnings:
+                    st.warning("未完成換匯的列會被略過：\n" + "\n".join(fx_warnings))
 
             st.write("**銀行 CSV 草稿預覽**")
-            edited_bank_df = st.data_editor(
-                pd.DataFrame(preview_rows),
-                hide_index=True,
-                use_container_width=True,
-                key=f"bank_csv_editor_{selected_bank}_{uploaded_bank_csv.name}",
-                column_config={
-                    "匯入": st.column_config.CheckboxColumn("匯入"),
-                    "日期": st.column_config.TextColumn("日期"),
-                    "金額": st.column_config.TextColumn("金額"),
-                    "所得類別": st.column_config.SelectboxColumn(
-                        "所得類別",
-                        options=income_type_options,
-                        help="銀行 CSV 不會自動猜所得類別，請 Diana 逐筆補上。",
-                    ),
-                    "扣繳綜所稅": st.column_config.TextColumn("扣繳綜所稅"),
-                    "扣繳二代健保": st.column_config.TextColumn("扣繳二代健保"),
-                    "對方": st.column_config.TextColumn("對方"),
-                    "說明": st.column_config.TextColumn("說明", width="large"),
-                    "備註": st.column_config.TextColumn("備註", width="medium"),
-                    "來源": st.column_config.TextColumn("來源", disabled=True),
-                    "來源列": st.column_config.TextColumn("來源列", disabled=True),
-                    "信心": st.column_config.NumberColumn("信心", format="%.2f", disabled=True),
-                },
+            edited_bank_df = _render_import_editor(
+                _build_preview_rows(drafts),
+                editor_key=f"bank_csv_editor_{selected_bank}_{uploaded_bank_csv.name}",
             )
-
-            if st.button("Diana 勾選確認後寫入", type="primary", key=f"bank_csv_commit_{selected_bank}"):
-                imported = 0
-                skipped = 0
-                errors = []
-
-                for idx, row in edited_bank_df.iterrows():
-                    if not bool(row.get("匯入", False)):
-                        skipped += 1
-                        continue
-
-                    income_type = str(row.get("所得類別", "") or "").strip()
-                    if income_type not in R.INCOME_TYPE_LABELS_ZH:
-                        skipped += 1
-                        errors.append(f"第 {idx+1} 筆：請先選所得類別")
-                        continue
-
-                    try:
-                        row_date = pd.to_datetime(row["日期"]).date()
-                        raw_description = str(row.get("說明", "") or "").strip()
-                        notes = str(row.get("備註", "") or "").strip()
-                        combined_notes = raw_description if not notes else f"{raw_description}\n{notes}" if raw_description else notes
-
-                        income = Income(
-                            date=row_date,
-                            amount=Decimal(str(row["金額"])),
-                            income_type=income_type,
-                            tax_withheld=Decimal(str(row.get("扣繳綜所稅", 0) or 0)),
-                            nhi_withheld=Decimal(str(row.get("扣繳二代健保", 0) or 0)),
-                            status="received",
-                            received_date=row_date,
-                            notes=combined_notes,
-                            tax_year=R.TAX_YEAR,
-                            source=str(row.get("來源", "bank_csv") or "bank_csv"),
-                        )
-                        save_income(income)
-                        imported += 1
-                    except Exception as e:
-                        skipped += 1
-                        errors.append(f"第 {idx+1} 筆：{e}")
-
-                st.success(f"✅ 銀行 CSV 匯入 {imported} 筆，跳過 {skipped} 筆")
-                if errors:
-                    st.error("錯誤：\n" + "\n".join(errors[:10]))
+            _commit_import_rows(
+                edited_bank_df,
+                button_key=f"bank_csv_commit_{selected_bank}",
+                button_label="Diana 勾選確認後寫入",
+            )
         elif uploaded_bank_csv:
             st.info("這份銀行 CSV 沒有解析出可匯入的入帳列。")
+
+    st.markdown("---")
+
+    st.subheader("Gmail 匯款通知匯入")
+    st.caption("用 Gmail API 抓最近的匯款／付款通知，先轉成草稿再由 Diana 決定是否寫入。")
+
+    uploaded_gmail_secret = st.file_uploader(
+        "上傳 Google OAuth client secret JSON",
+        type=["json"],
+        key="gmail_oauth_json",
+        help="請在 Google Cloud Console 建立 Desktop app OAuth client 後下載 JSON。",
+    )
+    if uploaded_gmail_secret is not None:
+        try:
+            save_uploaded_gmail_credentials(uploaded_gmail_secret.getvalue(), GMAIL_CLIENT_SECRET_PATH)
+            st.success(f"OAuth client 已儲存到 {GMAIL_CLIENT_SECRET_PATH}")
+        except Exception as exc:
+            st.error(f"OAuth client JSON 儲存失敗：{exc}")
+
+    gmail_query = st.text_input(
+        "Gmail 搜尋條件",
+        value=DEFAULT_GMAIL_QUERY,
+        key="gmail_import_query",
+    )
+    gmail_max_results = st.number_input(
+        "最多抓幾封",
+        min_value=1,
+        max_value=100,
+        value=15,
+        step=1,
+        key="gmail_import_limit",
+    )
+
+    if st.button("📬 抓最近通知", key="gmail_fetch_button"):
+        if not GMAIL_CLIENT_SECRET_PATH.exists():
+            st.error("先上傳 Google OAuth client secret JSON。")
+        else:
+            try:
+                gmail_drafts = fetch_income_drafts_from_gmail(
+                    GMAIL_CLIENT_SECRET_PATH,
+                    GMAIL_TOKEN_PATH,
+                    query=gmail_query,
+                    max_results=int(gmail_max_results),
+                )
+                st.session_state["gmail_draft_items"] = [draft.to_dict() for draft in gmail_drafts]
+            except GmailNotConfigured as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                st.error(f"Gmail 匯入失敗：{exc}")
+
+    gmail_draft_items = st.session_state.get("gmail_draft_items", [])
+    if gmail_draft_items:
+        gmail_drafts = _drafts_from_dicts(gmail_draft_items)
+        gmail_currencies = {
+            str(draft.currency or "TWD").upper()
+            for draft in gmail_drafts
+            if str(draft.currency or "TWD").upper() != "TWD"
+        }
+        if gmail_currencies:
+            gmail_fx_rates = _get_fx_rates_from_inputs(
+                key_prefix="gmail_import",
+                currencies=gmail_currencies,
+            )
+            gmail_drafts, gmail_fx_warnings = convert_drafts_to_twd(gmail_drafts, gmail_fx_rates)
+            if gmail_fx_warnings:
+                st.warning("未完成換匯的 Gmail 草稿會被略過：\n" + "\n".join(gmail_fx_warnings))
+
+        st.write("**Gmail 草稿預覽**")
+        edited_gmail_df = _render_import_editor(
+            _build_preview_rows(gmail_drafts),
+            editor_key="gmail_import_editor",
+        )
+        _commit_import_rows(
+            edited_gmail_df,
+            button_key="gmail_import_commit",
+            button_label="將勾選的 Gmail 草稿寫入",
+        )
 
     st.markdown("---")
 
@@ -390,8 +587,11 @@ with tab3:
     st.subheader("匯出 5 月報稅用草稿")
     st.caption("彙整所有收入、扣繳、試算稅額，產出一份她可以對著財政部官方軟體填的 summary")
 
-    from core.tax_engine import calculate_annual_tax
     from storage.db import get_settings
+    from sqlmodel import select
+    from core.report import build_markdown_report, IncomeRow, SlipRow
+    from core.models import WithholdingSlip
+    from core.report_pdf import PdfExportUnavailable, render_markdown_pdf
 
     incomes = list_incomes(tax_year=R.TAX_YEAR, limit=10000)
     settings = get_settings()
@@ -400,81 +600,68 @@ with tab3:
     if not incomes:
         st.info("還沒收入紀錄")
     else:
-        income_dicts = [{'amount': inc.amount, 'income_type': inc.income_type} for inc in incomes]
-        result = calculate_annual_tax(
-            incomes=income_dicts,
+        with get_session() as session:
+            slips = list(
+                session.exec(select(WithholdingSlip).where(WithholdingSlip.tax_year == R.TAX_YEAR))
+            )
+
+        income_rows = [
+            IncomeRow(
+                date=inc.date,
+                payer_name=clients.get(inc.client_id, "") if inc.client_id else "",
+                amount=inc.amount,
+                income_type=inc.income_type,
+                tax_withheld=inc.tax_withheld,
+                nhi_withheld=inc.nhi_withheld,
+            )
+            for inc in incomes
+        ]
+        slip_rows = [
+            SlipRow(
+                payer_name=slip.payer_name,
+                payer_tax_id=slip.payer_tax_id,
+                income_type=slip.income_type,
+                gross_amount=slip.gross_amount,
+                tax_withheld=slip.tax_withheld,
+                nhi_withheld=slip.nhi_withheld,
+            )
+            for slip in slips
+        ]
+
+        md = build_markdown_report(
+            tax_year=R.TAX_YEAR,
+            incomes=income_rows,
+            slips=slip_rows,
             is_married=settings.is_married,
             dependents=settings.dependents,
             has_elderly_dependent=settings.has_elderly_dependent,
             occupation=settings.occupation,
+            user_name=settings.name,
         )
-        total_withheld = sum((inc.tax_withheld for inc in incomes), Decimal(0))
-        result.total_tax_withheld = total_withheld
-
-        # 組 markdown 報表
-        from io import StringIO
-        buf = StringIO()
-        buf.write(f"# {R.TAX_YEAR} 年度綜所稅報稅草稿\n\n")
-        buf.write(f"產生日期：{date.today()}\n\n")
-        buf.write(f"## 個人資料\n\n")
-        buf.write(f"- 婚姻：{'已婚' if settings.is_married else '單身'}\n")
-        buf.write(f"- 扶養親屬：{settings.dependents} 位\n")
-        buf.write(f"- 職業：{R.OCCUPATION_LABELS_ZH.get(settings.occupation, settings.occupation)}\n\n")
-
-        buf.write(f"## 收入彙總\n\n")
-        buf.write(f"| 類別 | 金額 |\n|---|---|\n")
-        buf.write(f"| 薪資所得 (50) | NT$ {int(result.income_50_total):,} |\n")
-        buf.write(f"| 執業 9A | NT$ {int(result.income_9a_total):,} |\n")
-        buf.write(f"| 稿費/版稅 9B | NT$ {int(result.income_9b_author_total):,} |\n")
-        buf.write(f"| 講演鐘點費 9B | NT$ {int(result.income_9b_speech_total):,} |\n")
-        buf.write(f"| 其他 9B | NT$ {int(result.income_9b_other_total):,} |\n")
-        buf.write(f"| 其他所得 92 | NT$ {int(result.income_92_total):,} |\n\n")
-
-        buf.write(f"## 稅額試算\n\n")
-        buf.write(f"- 綜合所得總額：NT$ {int(result.gross_income):,}\n")
-        buf.write(f"- 免稅額：NT$ {int(result.exemption):,}\n")
-        buf.write(f"- 標準扣除額：NT$ {int(result.standard_deduction):,}\n")
-        buf.write(f"- 薪資特別扣除：NT$ {int(result.salary_special_deduction):,}\n")
-        buf.write(f"- 應稅所得淨額：NT$ {int(result.taxable_income):,}\n")
-        buf.write(f"- 適用稅率：{result.tax_rate*100:.0f}%\n")
-        buf.write(f"- 應納稅額：NT$ {int(result.tax_payable):,}\n")
-        buf.write(f"- 已扣繳綜所稅：NT$ {int(result.total_tax_withheld):,}\n\n")
-
-        if result.tax_payable > result.total_tax_withheld:
-            buf.write(f"**預估應補繳：NT$ {int(result.tax_payable - result.total_tax_withheld):,}**\n\n")
-        else:
-            buf.write(f"**預估可退稅：NT$ {int(result.total_tax_withheld - result.tax_payable):,}**\n\n")
-
-        buf.write(f"## 明細（業主彙總）\n\n")
-        by_client = {}
-        for inc in incomes:
-            key = clients.get(inc.client_id, '（不指定）')
-            by_client.setdefault(key, []).append(inc)
-
-        for cname, incs in by_client.items():
-            total = sum((i.amount for i in incs), Decimal(0))
-            tw = sum((i.tax_withheld for i in incs), Decimal(0))
-            buf.write(f"### {cname}\n")
-            buf.write(f"合計：NT$ {int(total):,}，已扣繳：NT$ {int(tw):,}\n\n")
-            buf.write(f"| 日期 | 金額 | 類別 | 扣繳 |\n|---|---|---|---|\n")
-            for inc in incs:
-                buf.write(f"| {inc.date} | NT$ {int(inc.amount):,} | {R.INCOME_TYPE_LABELS_ZH.get(inc.income_type, '')} | NT$ {int(inc.tax_withheld):,} |\n")
-            buf.write("\n")
-
-        buf.write("---\n\n")
-        buf.write("⚠️ 本草稿僅為試算參考，實際申報請以財政部電子申報系統為準。\n")
-
-        md = buf.getvalue()
         st.markdown("### 預覽")
         with st.container(border=True):
             st.markdown(md)
 
-        st.download_button(
-            "⬇️ 下載 Markdown",
-            data=md.encode('utf-8'),
-            file_name=f"diana_tax_draft_{R.TAX_YEAR}.md",
-            mime="text/markdown",
-        )
+        export_col_1, export_col_2 = st.columns(2)
+        with export_col_1:
+            st.download_button(
+                "⬇️ 下載 Markdown",
+                data=md.encode('utf-8'),
+                file_name=f"diana_tax_draft_{R.TAX_YEAR}.md",
+                mime="text/markdown",
+            )
+        with export_col_2:
+            try:
+                pdf_bytes = render_markdown_pdf(md, title=f"{R.TAX_YEAR} 年度綜所稅申報草稿")
+            except PdfExportUnavailable as exc:
+                st.info(str(exc))
+            else:
+                st.download_button(
+                    "⬇️ 下載 PDF",
+                    data=pdf_bytes,
+                    file_name=f"diana_tax_draft_{R.TAX_YEAR}.pdf",
+                    mime="application/pdf",
+                )
 
 
 # ============================================================
@@ -483,10 +670,10 @@ with tab3:
 with tab4:
     st.subheader("🔮 未來會加的整合")
     st.markdown("""
-    **v1（1-2 個月）**
-    - 📄 **扣繳憑單 PDF OCR**：業主寄電子檔來，丟上去自動抽金額、類型、扣繳額
-    - 🏦 **銀行 CSV parser**：台銀 / 玉山 / 國泰 / Richart 各自 parser
-    - 📧 **Gmail email 解析**：看到匯款通知自動建 draft 收入
+    **下一波優化**
+    - 🌏 **Wise 匯率來源自動化**：現在是 Diana 手動決定採用匯率，下一步可接匯率來源
+    - 🧠 **跨來源 dedup 規則加強**：現在已做保守 dedup，下一步可加更多模糊比對
+    - 📧 **Gmail 匯入模板**：依不同業主建立專用 query / sender allowlist
     - 🧾 **電子發票 API**：抓載具費用明細
 
     **v2（3-6 個月）**

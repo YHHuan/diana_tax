@@ -16,6 +16,7 @@ from sqlmodel import select
 from storage.db import get_session, get_settings, list_incomes
 from core.models import WithholdingSlip, Client
 from core.report import build_markdown_report, IncomeRow, SlipRow
+from core.report_pdf import PdfExportUnavailable, render_markdown_pdf
 from core import rules_114 as R
 
 
@@ -101,13 +102,27 @@ md = build_markdown_report(
     user_name=settings.name,
 )
 
-st.download_button(
-    "⬇️ 下載 Markdown 草稿",
-    data=md.encode("utf-8"),
-    file_name=f"diana_tax_draft_{tax_year}.md",
-    mime="text/markdown",
-    type="primary",
-)
+download_col_1, download_col_2 = st.columns(2)
+with download_col_1:
+    st.download_button(
+        "⬇️ 下載 Markdown 草稿",
+        data=md.encode("utf-8"),
+        file_name=f"diana_tax_draft_{tax_year}.md",
+        mime="text/markdown",
+        type="primary",
+    )
+with download_col_2:
+    try:
+        pdf_bytes = render_markdown_pdf(md, title=f"{tax_year} 年度綜所稅申報草稿")
+    except PdfExportUnavailable as exc:
+        st.info(str(exc))
+    else:
+        st.download_button(
+            "⬇️ 下載 PDF 草稿",
+            data=pdf_bytes,
+            file_name=f"diana_tax_draft_{tax_year}.pdf",
+            mime="application/pdf",
+        )
 
 st.divider()
 if include_draft_preview:
