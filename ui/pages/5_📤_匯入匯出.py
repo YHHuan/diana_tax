@@ -17,7 +17,7 @@ from decimal import Decimal
 import json
 from tempfile import NamedTemporaryFile
 
-from storage.db import list_incomes, save_income, list_clients, save_client
+from storage.db import list_incomes, save_income, list_clients, save_client, get_session
 from core.models import Income, Client
 from core import rules_114 as R
 from importers.bank_csv import parse as parse_bank_csv
@@ -162,15 +162,85 @@ with tab1:
     st.markdown("---")
 
     # === 扣繳憑單 ===
-    st.subheader("扣繳憑單 PDF 上傳")
-    st.caption("先放上傳入口；後續會接 Claude 的 slip_ocr 結構化解析。")
+    st.subheader("扣繳憑單 PDF 上傳（Claude OCR）")
+    st.caption("上傳後交給 Claude API 結構化抽取。Diana 確認後才寫入 DB。")
 
-    uploaded_slip_pdf = st.file_uploader("上傳扣繳憑單 PDF", type=["pdf"], key="slip_pdf_uploader")
-    if st.button("送去解析（coming soon）", key="slip_pdf_parse_stub"):
-        if not uploaded_slip_pdf:
-            st.warning("請先上傳一份 PDF。")
+    uploaded_slip_pdf = st.file_uploader(
+        "上傳扣繳憑單 PDF",
+        type=["pdf"],
+        key="slip_pdf_uploader",
+        accept_multiple_files=False,
+    )
+
+    if uploaded_slip_pdf and st.button("🤖 用 Claude 解析", key="slip_pdf_parse_live", type="primary"):
+        import os as _os
+        from importers.slip_ocr import parse_slip
+        from importers.llm.anthropic_client import AnthropicNotConfigured
+        if not _os.environ.get("ANTHROPIC_API_KEY"):
+            st.error(
+                "找不到 ANTHROPIC_API_KEY 環境變數。在啟動 streamlit 前先：\n"
+                "```bash\nexport ANTHROPIC_API_KEY=sk-ant-...\n```"
+            )
         else:
-            st.info("Claude's slip_ocr will parse this — coming soon")
+            with st.spinner("Claude 正在讀 PDF..."):
+                try:
+                    draft = parse_slip(uploaded_slip_pdf.getvalue())
+                    st.session_state["slip_draft"] = draft.to_dict()
+                except AnthropicNotConfigured as e:
+                    st.error(f"Anthropic 未配置：{e}")
+                except Exception as e:
+                    st.error(f"解析失敗：{e}")
+
+    if st.session_state.get("slip_draft"):
+        draft_dict = st.session_state["slip_draft"]
+        st.success(f"✅ 解析完成（confidence: {draft_dict.get('confidence', 0):.2f}）")
+
+        with st.form("confirm_slip_form"):
+            st.markdown("**請 Diana 確認／修改後再存：**")
+            cc1, cc2, cc3 = st.columns(3)
+            with cc1:
+                c_payer = st.text_input("扣繳單位", value=draft_dict["payer_name"])
+                c_tax_id = st.text_input("統編", value=draft_dict.get("payer_tax_id") or "")
+            with cc2:
+                TYPE_ORDER = ["50", "9A", "9B_author", "9B_speech", "9B_other", "92"]
+                default_idx = TYPE_ORDER.index(draft_dict["income_type"]) if draft_dict["income_type"] in TYPE_ORDER else 4
+                c_type = st.selectbox("所得類別", TYPE_ORDER, index=default_idx)
+                c_year = st.number_input("稅年度（民國）", min_value=100, max_value=130, value=int(draft_dict["tax_year"]))
+            with cc3:
+                c_gross = st.number_input("給付總額", min_value=0.0, value=float(draft_dict["gross_amount"]))
+                c_tax = st.number_input("扣繳綜所稅", min_value=0.0, value=float(draft_dict["tax_withheld"]))
+                c_nhi = st.number_input("扣繳二代健保", min_value=0.0, value=float(draft_dict.get("nhi_withheld", 0)))
+
+            c_notes = st.text_area("備註", value=draft_dict.get("notes", ""))
+            cols = st.columns(2)
+            with cols[0]:
+                save = st.form_submit_button("💾 存入扣繳憑單", type="primary")
+            with cols[1]:
+                clear = st.form_submit_button("🗑️ 丟掉重來")
+
+            if clear:
+                st.session_state.pop("slip_draft", None)
+                st.rerun()
+
+            if save:
+                from core.models import WithholdingSlip
+                from decimal import Decimal as _D
+                slip = WithholdingSlip(
+                    tax_year=int(c_year),
+                    payer_name=c_payer.strip(),
+                    payer_tax_id=(c_tax_id.strip() or None),
+                    income_type=c_type,
+                    gross_amount=_D(str(c_gross)),
+                    tax_withheld=_D(str(c_tax)),
+                    nhi_withheld=_D(str(c_nhi)),
+                    source="pdf_ocr",
+                    notes=c_notes,
+                )
+                with get_session() as _s:
+                    _s.add(slip)
+                    _s.commit()
+                st.success("扣繳憑單已存入。")
+                st.session_state.pop("slip_draft", None)
 
     st.markdown("---")
 
