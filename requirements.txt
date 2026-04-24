@@ -2,3 +2,7 @@ streamlit>=1.32.0
 sqlmodel>=0.0.22
 pandas>=2.0.0
 pytest>=8.0.0
+
+# LLM-backed importers (slip OCR). Optional at import time —
+# importers.llm raises AnthropicNotConfigured if anthropic or the key is missing.
+anthropic>=0.40.0
