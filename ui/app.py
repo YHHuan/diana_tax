@@ -18,9 +18,12 @@ import streamlit as st
 from datetime import date
 from decimal import Decimal
 
-from storage.db import init_db, list_incomes, get_settings
+from storage.db import init_db, list_incomes, get_settings, get_session
 from core import rules_114 as R
 from core.tax_engine import calculate_annual_tax
+from core.receivables import IncomeLite, classify_receivables
+from core.models import Client
+from sqlmodel import select
 
 
 # ============================================================
@@ -56,9 +59,11 @@ with st.sidebar:
     - 🧮 **稅額試算** — 年度 / 情境試算
     - 👤 **個人設定** — 婚姻、職業、扶養
     - 📤 **匯入 / 匯出** — 銀行 CSV、扣繳憑單
+    - ⏰ **應收追蹤** — 逾期未收 + 催款草稿
+    - 📄 **報稅草稿** — 一鍵產出 Markdown 草稿
     """)
     st.divider()
-    st.caption("v0 - 2026/04")
+    st.caption("v1-dev · 2026/04")
 
 
 # ============================================================
@@ -149,6 +154,39 @@ with st.expander("🧮 本年度綜所稅試算細節", expanded=True):
 
 
 st.divider()
+
+
+# ---- 應收快照 ----
+with get_session() as _s:
+    _clients = list(_s.exec(select(Client)))
+_name_by_id = {c.id: c.name for c in _clients}
+_lites = [
+    IncomeLite(
+        id=str(i.id),
+        date=i.date,
+        amount=i.amount,
+        currency=i.currency,
+        payer_name=_name_by_id.get(i.client_id, "") if i.client_id else "",
+        status=i.status,
+        received_date=i.received_date,
+    )
+    for i in incomes
+]
+_recv = classify_receivables(_lites)
+_soft = [r for r in _recv if r.category == "overdue_soft"]
+_hard = [r for r in _recv if r.category == "overdue_hard"]
+if _soft or _hard:
+    st.subheader("⏰ 應收警示")
+    r1, r2, r3 = st.columns(3)
+    with r1:
+        st.metric("軟逾期（≥30d）", f"{len(_soft)} 筆")
+    with r2:
+        st.metric("硬逾期（≥60d）", f"{len(_hard)} 筆", delta="要處理", delta_color="inverse")
+    with r3:
+        _total_owe = sum((r.income.amount for r in _soft + _hard), Decimal(0))
+        st.metric("逾期金額", f"NT$ {int(_total_owe):,}")
+    st.caption("→ 詳細清單 + 催款草稿在「⏰ 應收追蹤」頁")
+    st.divider()
 
 
 # ---- 近期收入 ----
